@@ -3,10 +3,12 @@ package com.slackai.slackaidatabot;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import jakarta.annotation.PostConstruct;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -31,6 +33,9 @@ public class ScheduledReportService {
     private final Map<String, ReportConfig> subscriptions = new ConcurrentHashMap<>();
 
     @Autowired
+    private JdbcTemplate jdbc;
+
+    @Autowired
     private DatabaseService databaseService;
     @Autowired
     private LangChainService langChainService;
@@ -46,6 +51,22 @@ public class ScheduledReportService {
 
     @Value("${report.default.channel:}")
     private String defaultChannel;
+
+    /** Load persisted subscriptions from PostgreSQL on startup. */
+    @PostConstruct
+    public void loadSubscriptionsFromDb() {
+        try {
+            jdbc.queryForList("SELECT channel_id, schedule, query FROM public.report_subscriptions")
+                    .forEach(row -> subscriptions.put(
+                            (String) row.get("channel_id"),
+                            new ReportConfig((String) row.get("channel_id"),
+                                    (String) row.get("schedule"),
+                                    (String) row.get("query"))));
+            System.out.println("✅ Loaded " + subscriptions.size() + " report subscription(s) from DB.");
+        } catch (Exception e) {
+            System.err.println("⚠️ Could not load report subscriptions from DB: " + e.getMessage());
+        }
+    }
 
     // ── Scheduled triggers ────────────────────────────────────────────────────
 
@@ -67,14 +88,28 @@ public class ScheduledReportService {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /** Register or update a channel subscription. */
+    /** Register or update a channel subscription (persisted to DB). */
     public void subscribe(String channelId, String schedule, String query) {
         subscriptions.put(channelId, new ReportConfig(channelId, schedule, query));
+        try {
+            jdbc.update("""
+                    INSERT INTO public.report_subscriptions (channel_id, schedule, query)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (channel_id) DO UPDATE SET schedule = EXCLUDED.schedule, query = EXCLUDED.query
+                    """, channelId, schedule, query);
+        } catch (Exception e) {
+            System.err.println("⚠️ Could not persist subscription: " + e.getMessage());
+        }
     }
 
-    /** Remove a channel subscription. */
+    /** Remove a channel subscription (persisted to DB). */
     public void unsubscribe(String channelId) {
         subscriptions.remove(channelId);
+        try {
+            jdbc.update("DELETE FROM public.report_subscriptions WHERE channel_id = ?", channelId);
+        } catch (Exception e) {
+            System.err.println("⚠️ Could not delete subscription: " + e.getMessage());
+        }
     }
 
     /** Immediately run and post the report for a channel (for /report-now). */

@@ -32,6 +32,8 @@ public class SlackController {
     private PagedResultStore resultStore;
     @Autowired
     private WebClient.Builder webClientBuilder;
+    @Autowired
+    private AllowlistController allowlist;
 
     @Value("${langchain.service.url}")
     private String langchainServiceUrl;
@@ -52,6 +54,11 @@ public class SlackController {
             @RequestParam(value = "channel_id", required = false) String channelId,
             @RequestParam(value = "user_id", required = false) String userId,
             HttpServletRequest request) {
+
+        // Access control check
+        if (userId != null && !allowlist.isAllowed(userId)) {
+            return ResponseEntity.ok("🔒 Access denied. Contact a workspace admin to be added to the allowlist.");
+        }
 
         // Validate Slack signing secret
         if (!slackSigningSecret.isBlank() && !validateSlackRequest(request)) {

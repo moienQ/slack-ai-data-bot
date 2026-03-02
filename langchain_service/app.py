@@ -7,6 +7,13 @@ from collections import deque
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    _HAS_PSYCOPG2 = True
+except ImportError:
+    _HAS_PSYCOPG2 = False
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -28,9 +35,90 @@ CONVERSATIONS: dict = {}
 MEMORY_TURNS = 5          # How many turns to remember
 
 
+# ── Database helpers (for persistent memory) ─────────────────────────────────
+
+FLASK_DB_URL = os.environ.get("FLASK_DB_URL", "postgresql://analytics_user@localhost:5432/analytics")
+
+
+def _db():
+    """Open a short-lived psycopg2 connection."""
+    if not _HAS_PSYCOPG2:
+        return None
+    try:
+        return psycopg2.connect(FLASK_DB_URL)
+    except Exception as e:
+        print(f"[DB] connection failed: {e}")
+        return None
+
+
+def _load_memory_from_db(user_id: str) -> deque:
+    """Load last MEMORY_TURNS conversation turns from DB."""
+    conn = _db()
+    if conn is None:
+        return deque(maxlen=MEMORY_TURNS)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT question, sql FROM public.conversation_memory
+                WHERE user_id = %s
+                ORDER BY turn_index DESC LIMIT %s
+            """, (user_id, MEMORY_TURNS))
+            rows = list(reversed(cur.fetchall()))
+        return deque([dict(r) for r in rows], maxlen=MEMORY_TURNS)
+    except Exception as e:
+        print(f"[DB] load_memory error: {e}")
+        return deque(maxlen=MEMORY_TURNS)
+    finally:
+        conn.close()
+
+
+def _save_turn_to_db(user_id: str, question: str, sql: str):
+    """Persist a conversation turn to DB (upsert by turn_index)."""
+    conn = _db()
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            # Get current max turn_index for user
+            cur.execute("SELECT COALESCE(MAX(turn_index), -1) FROM public.conversation_memory WHERE user_id = %s", (user_id,))
+            next_idx = cur.fetchone()[0] + 1
+            cur.execute("""
+                INSERT INTO public.conversation_memory (user_id, turn_index, question, sql)
+                VALUES (%s, %s, %s, %s)
+            """, (user_id, next_idx, question, sql))
+            # Keep only last MEMORY_TURNS rows
+            cur.execute("""
+                DELETE FROM public.conversation_memory
+                WHERE user_id = %s AND turn_index <= (
+                    SELECT MAX(turn_index) - %s FROM public.conversation_memory WHERE user_id = %s
+                )
+            """, (user_id, MEMORY_TURNS - 1, user_id))
+        conn.commit()
+    except Exception as e:
+        print(f"[DB] save_turn error: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def _clear_memory_from_db(user_id: str):
+    """Delete all stored turns for a user."""
+    conn = _db()
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public.conversation_memory WHERE user_id = %s", (user_id,))
+        conn.commit()
+    except Exception as e:
+        print(f"[DB] clear_memory error: {e}")
+    finally:
+        conn.close()
+
+
 def _get_conversation(user_id: str) -> deque:
     if user_id not in CONVERSATIONS:
-        CONVERSATIONS[user_id] = deque(maxlen=MEMORY_TURNS)
+        CONVERSATIONS[user_id] = _load_memory_from_db(user_id)
     return CONVERSATIONS[user_id]
 
 
@@ -192,8 +280,9 @@ def generate_sql():
     if not _is_select(sql):
         return jsonify({"error": "Only SELECT queries are allowed."}), 400
 
-    # 5. Store in conversation memory & cache
+    # 5. Store in conversation memory (in-memory + DB) & cache
     _get_conversation(user_id).append({"question": question, "sql": sql})
+    _save_turn_to_db(user_id, question, sql)
     _set_cached(question, user_id, sql)
 
     return jsonify({"sql": sql, "cached": False})
@@ -201,11 +290,12 @@ def generate_sql():
 
 @app.route("/clear-memory", methods=["POST"])
 def clear_memory():
-    """Clear conversation history for a user."""
+    """Clear conversation history for a user (in-memory + DB)."""
     data = request.get_json()
     user_id = data.get("user_id", "anonymous")
     if user_id in CONVERSATIONS:
         del CONVERSATIONS[user_id]
+    _clear_memory_from_db(user_id)
     return jsonify({"message": f"Memory cleared for {user_id}"})
 
 
@@ -261,11 +351,12 @@ def generate_chart():
     except ImportError:
         return jsonify({"error": "matplotlib not installed"}), 500
 
-    data = request.get_json()
-    rows   = data.get("rows", [])
-    x_col  = data.get("x_col")
-    y_col  = data.get("y_col")
-    title  = data.get("title", "Query Results")
+    data       = request.get_json()
+    rows       = data.get("rows", [])
+    x_col      = data.get("x_col")
+    y_col      = data.get("y_col")
+    title      = data.get("title", "Query Results")
+    chart_type = data.get("chart_type", "bar").lower()  # bar | line | pie
 
     if not rows or not x_col or not y_col:
         return jsonify({"error": "rows, x_col, and y_col are required"}), 400
@@ -273,15 +364,34 @@ def generate_chart():
     x_vals = [str(r.get(x_col, "")) for r in rows]
     y_vals = [float(r.get(y_col) or 0) for r in rows]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(x_vals, y_vals, color="#4A90D9", edgecolor="white", linewidth=0.5)
-    ax.set_xlabel(x_col, fontsize=11)
-    ax.set_ylabel(y_col, fontsize=11)
-    ax.set_title(title, fontsize=13, fontweight="bold")
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    plt.xticks(rotation=45, ha="right", fontsize=9)
-    plt.tight_layout()
+    PALETTE = ["#4A90D9", "#E67E22", "#2ECC71", "#9B59B6",
+               "#E74C3C", "#1ABC9C", "#F39C12", "#3498DB"]
 
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    if chart_type == "pie":
+        ax.pie(y_vals, labels=x_vals, autopct="%1.1f%%",
+               colors=PALETTE[:len(x_vals)], startangle=140)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+    elif chart_type == "line":
+        ax.plot(x_vals, y_vals, marker="o", color="#4A90D9", linewidth=2)
+        ax.fill_between(range(len(x_vals)), y_vals, alpha=0.15, color="#4A90D9")
+        ax.set_xlabel(x_col, fontsize=11)
+        ax.set_ylabel(y_col, fontsize=11)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        plt.xticks(rotation=45, ha="right", fontsize=9)
+    else:  # default: bar
+        colors = PALETTE[:len(x_vals)] if len(x_vals) <= len(PALETTE) \
+                 else [PALETTE[i % len(PALETTE)] for i in range(len(x_vals))]
+        ax.bar(x_vals, y_vals, color=colors, edgecolor="white", linewidth=0.5)
+        ax.set_xlabel(x_col, fontsize=11)
+        ax.set_ylabel(y_col, fontsize=11)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        plt.xticks(rotation=45, ha="right", fontsize=9)
+
+    plt.tight_layout()
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=120)
     buf.seek(0)
