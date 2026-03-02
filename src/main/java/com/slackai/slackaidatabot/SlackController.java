@@ -56,7 +56,7 @@ public class SlackController {
             return ResponseEntity.status(401).body("Unauthorized: invalid Slack signature.");
         }
 
-        CompletableFuture.runAsync(() -> processAndRespond(userQuestion, responseUrl, channelId));
+        CompletableFuture.runAsync(() -> processAndRespond(userQuestion, responseUrl, channelId, userId));
 
         return ResponseEntity.ok("⏳ Processing your query: _" + userQuestion + "_");
     }
@@ -92,11 +92,37 @@ public class SlackController {
         return ResponseEntity.ok("⏳ Generating CSV export...");
     }
 
+    // ── /slack/clear-memory ───────────────────────────────────────────────────
+
+    @PostMapping(value = "/slack/clear-memory", consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
+    public ResponseEntity<String> clearMemory(
+            @RequestParam(value = "user_id", required = false) String userId,
+            @RequestParam(value = "response_url", required = false) String responseUrl,
+            HttpServletRequest request) {
+
+        String uid = userId != null ? userId : "anonymous";
+        CompletableFuture.runAsync(() -> {
+            try {
+                webClientBuilder.build()
+                        .post().uri(langchainServiceUrl + "/clear-memory")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(Map.of("user_id", uid))
+                        .retrieve().toBodilessEntity().block();
+                postToResponseUrl(responseUrl, "🧹 Conversation memory cleared! Start a fresh query with `/ask-data`.");
+            } catch (Exception e) {
+                postToResponseUrl(responseUrl, "❌ Could not clear memory: " + e.getMessage());
+            }
+        });
+        return ResponseEntity.ok("🧹 Clearing your conversation memory...");
+    }
+
     // ── Processing ────────────────────────────────────────────────────────────
 
-    private void processAndRespond(String userQuestion, String responseUrl, String channelId) {
+    private void processAndRespond(String userQuestion, String responseUrl, String channelId, String userId) {
         try {
-            String sql = langChainService.generateSql(userQuestion);
+            // Fetch live schema for dynamic prompt
+            List<Map<String, Object>> schema = databaseService.getTableSchema();
+            String sql = langChainService.generateSql(userQuestion, userId, schema);
 
             // Persist last SQL for this channel (for /export-csv)
             if (channelId != null)

@@ -16,4 +16,18 @@ public class DatabaseService {
     public List<Map<String, Object>> executeQuery(String sql) {
         return jdbcTemplate.queryForList(sql);
     }
+
+    /**
+     * Returns live schema for the sales_daily table from information_schema.
+     * Passed to Flask so Gemini uses the real column definitions.
+     */
+    public List<Map<String, Object>> getTableSchema() {
+        return jdbcTemplate.queryForList("""
+                SELECT column_name, data_type, character_maximum_length
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name   = 'sales_daily'
+                ORDER BY ordinal_position
+                """);
+    }
 }
