@@ -27,7 +27,9 @@ public class SlackController {
     @Autowired
     private DatabaseService databaseService;
     @Autowired
-    private SlackResponseFormatter formatter;
+    private BlockKitFormatter blockKit;
+    @Autowired
+    private PagedResultStore resultStore;
     @Autowired
     private WebClient.Builder webClientBuilder;
 
@@ -56,9 +58,21 @@ public class SlackController {
             return ResponseEntity.status(401).body("Unauthorized: invalid Slack signature.");
         }
 
-        CompletableFuture.runAsync(() -> processAndRespond(userQuestion, responseUrl, channelId, userId));
+        String text = userQuestion != null ? userQuestion.trim() : "";
 
-        return ResponseEntity.ok("⏳ Processing your query: _" + userQuestion + "_");
+        if (text.isEmpty()) {
+            // No inline text — open a rich modal dialog
+            String triggerId = request.getParameter("trigger_id");
+            if (triggerId != null && !triggerId.isBlank() && !slackBotToken.isBlank()) {
+                openModal(triggerId);
+                return ResponseEntity.ok("");
+            }
+            return ResponseEntity.ok("Please type your question: `/ask-data What are total sales?`");
+        }
+
+        CompletableFuture.runAsync(() -> processAndRespond(text, responseUrl, channelId, userId));
+
+        return ResponseEntity.ok("⏳ Processing your query: _" + text + "_");
     }
 
     // ── /slack/export-csv ─────────────────────────────────────────────────────
@@ -129,16 +143,22 @@ public class SlackController {
                 lastSqlByChannel.put(channelId, sql);
 
             List<Map<String, Object>> rows = databaseService.executeQuery(sql);
-            String text = formatter.format(rows);
-            postToResponseUrl(responseUrl, text);
 
-            // Auto-generate chart if result is date+numeric with ≥3 rows
+            // Save for pagination and build Block Kit blocks
+            String queryId = resultStore.save(rows, userQuestion, userId != null ? userId : "anon");
+            Map<String, Object> blocksPayload = blockKit.buildResultBlocks(rows, userQuestion, 0, queryId);
+            blocksPayload.put("replace_original", false);
+            postToResponseUrl(responseUrl, blocksPayload);
+
+            // Auto-generate chart if chartable
             if (channelId != null && isChartable(rows)) {
                 generateAndUploadChart(rows, userQuestion, channelId);
             }
 
         } catch (Exception e) {
-            postToResponseUrl(responseUrl, "```\nError: " + e.getMessage() + "\n```");
+            Map<String, Object> err = blockKit.errorBlocks(userQuestion, e.getMessage());
+            err.put("replace_original", false);
+            postToResponseUrl(responseUrl, err);
         }
     }
 
@@ -195,16 +215,27 @@ public class SlackController {
 
     // ── Slack API Helpers ─────────────────────────────────────────────────────
 
-    private void postToResponseUrl(String responseUrl, String text) {
+    private void postToResponseUrl(String responseUrl, Object payload) {
         if (responseUrl == null || responseUrl.isBlank())
             return;
-        String payload = "{\"text\": " + escapeJson(text) + ", \"replace_original\": false}";
         webClientBuilder.build()
                 .post().uri(responseUrl)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(payload)
                 .retrieve().toBodilessEntity()
                 .subscribe();
+    }
+
+    private void openModal(String triggerId) {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("trigger_id", triggerId);
+        body.put("view", blockKit.buildAskDataModal());
+        webClientBuilder.build()
+                .post().uri("https://slack.com/api/views.open")
+                .header("Authorization", "Bearer " + slackBotToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .retrieve().toBodilessEntity().subscribe();
     }
 
     private void uploadFileToSlack(String channelId, byte[] content, String filename,
