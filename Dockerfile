@@ -6,8 +6,8 @@ RUN mvn dependency:go-offline -B
 COPY src ./src
 RUN mvn clean package -DskipTests
 
-# Runtime image — slim JRE only
-FROM eclipse-temurin:17-jre-alpine
+# Runtime image — Ubuntu Jammy (NOT Alpine — musl libc causes Java networking issues)
+FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE 8080
