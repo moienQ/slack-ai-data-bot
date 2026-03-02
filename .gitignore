@@ -1,0 +1,27 @@
+# Build artifacts
+target/
+*.class
+*.jar
+
+# Secrets — never commit these
+.env
+langchain_service/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+langchain_service/venv/
+langchain_service/.venv/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
