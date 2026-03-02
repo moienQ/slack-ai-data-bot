@@ -50,6 +50,28 @@ public class LangChainService {
         return (String) response.get("sql");
     }
 
+    /** Full multi-table schema passed to Flask — enables auto-JOIN queries. */
+    public String generateSqlMultiTable(String userQuestion, String userId,
+            List<Map<String, Object>> fullSchema) {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("question", userQuestion);
+        requestBody.put("user_id", userId != null ? userId : "anonymous");
+        requestBody.put("schema", fullSchema);
+        requestBody.put("multi_table", true); // signals Flask to use multi-table prompt
+
+        Map<?, ?> response = webClient.post()
+                .uri(langchainServiceUrl + "/generate-sql")
+                .bodyValue(requestBody)
+                .retrieve()
+                .bodyToMono(Map.class)
+                .block();
+
+        if (response == null || !response.containsKey("sql")) {
+            throw new RuntimeException("LangChain service returned an invalid response.");
+        }
+        return (String) response.get("sql");
+    }
+
     /** Backward-compatible overload (no user context). */
     public String generateSql(String userQuestion) {
         return generateSql(userQuestion, "anonymous", null);

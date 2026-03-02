@@ -18,16 +18,40 @@ public class DatabaseService {
     }
 
     /**
-     * Returns live schema for the sales_daily table from information_schema.
-     * Passed to Flask so Gemini uses the real column definitions.
+     * Schema for the primary sales_daily table (legacy single-table calls).
      */
     public List<Map<String, Object>> getTableSchema() {
         return jdbcTemplate.queryForList("""
-                SELECT column_name, data_type, character_maximum_length
+                SELECT column_name, data_type
                 FROM information_schema.columns
                 WHERE table_schema = 'public'
                   AND table_name   = 'sales_daily'
                 ORDER BY ordinal_position
                 """);
+    }
+
+    /**
+     * Full schema across ALL tables in the public schema — used for multi-table /
+     * auto-JOIN.
+     * Returns rows: table_name, column_name, data_type
+     */
+    public List<Map<String, Object>> getFullSchema() {
+        return jdbcTemplate.queryForList("""
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                ORDER BY table_name, ordinal_position
+                """);
+    }
+
+    /**
+     * Returns the list of tables in the public schema.
+     */
+    public List<String> getTableNames() {
+        return jdbcTemplate.queryForList("""
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                """, String.class);
     }
 }

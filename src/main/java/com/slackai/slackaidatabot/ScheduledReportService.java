@@ -1,6 +1,5 @@
 package com.slackai.slackaidatabot;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
@@ -47,8 +46,6 @@ public class ScheduledReportService {
 
     @Value("${report.default.channel:}")
     private String defaultChannel;
-
-    private final ObjectMapper mapper = new ObjectMapper();
 
     // ── Scheduled triggers ────────────────────────────────────────────────────
 

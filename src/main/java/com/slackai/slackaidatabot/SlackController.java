@@ -134,9 +134,9 @@ public class SlackController {
 
     private void processAndRespond(String userQuestion, String responseUrl, String channelId, String userId) {
         try {
-            // Fetch live schema for dynamic prompt
-            List<Map<String, Object>> schema = databaseService.getTableSchema();
-            String sql = langChainService.generateSql(userQuestion, userId, schema);
+            // Fetch full multi-table schema for auto-JOIN support
+            List<Map<String, Object>> fullSchema = databaseService.getFullSchema();
+            String sql = langChainService.generateSqlMultiTable(userQuestion, userId, fullSchema);
 
             // Persist last SQL for this channel (for /export-csv)
             if (channelId != null)

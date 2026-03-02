@@ -95,10 +95,30 @@ def _is_select(sql: str) -> bool:
     return sql.strip().upper().startswith("SELECT")
 
 
-def _build_schema_section(schema: list | None) -> str:
+def _build_schema_section(schema: list | None, multi_table: bool = False) -> str:
     """Build schema section from live schema or fall back to hardcoded."""
     if not schema:
         return FALLBACK_SCHEMA
+
+    # Multi-table: schema rows have 'table_name' key
+    if multi_table or (schema and 'table_name' in schema[0]):
+        from collections import defaultdict
+        tables: dict = defaultdict(list)
+        for col in schema:
+            tables[col['table_name']].append(
+                f"  - {col['column_name']} ({col['data_type']})")
+        lines = ["Available tables in schema public:"]
+        for tbl, cols in tables.items():
+            lines.append(f"\nTable: public.{tbl}")
+            lines.append("Columns:")
+            lines.extend(cols)
+        lines.append("\nJoin hints:")
+        lines.append("  - sales_daily.region  → region_targets.region")
+        lines.append("  - sales_daily.category → categories.category")
+        lines.append("  - customers.region    → region_targets.region")
+        return "\n".join(lines)
+
+    # Single-table fallback
     lines = ["Table: public.sales_daily", "Columns:"]
     for col in schema:
         lines.append(f"  - {col['column_name']} ({col['data_type']})")
@@ -130,8 +150,9 @@ def health():
 def generate_sql():
     data = request.get_json()
     question = data.get("question", "").strip()
-    user_id  = data.get("user_id", "anonymous")
-    schema   = data.get("schema")   # live schema from Spring Boot (optional)
+    user_id   = data.get("user_id", "anonymous")
+    schema    = data.get("schema")
+    multi_table = data.get("multi_table", False)
 
     if not question:
         return jsonify({"error": "question is required"}), 400
@@ -142,7 +163,7 @@ def generate_sql():
         return jsonify({"sql": cached_sql, "cached": True})
 
     # 2. Build prompt with live schema + conversation memory
-    schema_section = _build_schema_section(schema)
+    schema_section = _build_schema_section(schema, multi_table)
     conversation_context = _conversation_context(user_id)
     prompt = PROMPT_TEMPLATE.format(
         schema_section=schema_section,
