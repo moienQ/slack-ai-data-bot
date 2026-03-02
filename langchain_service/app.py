@@ -95,6 +95,16 @@ def _is_select(sql: str) -> bool:
     return sql.strip().upper().startswith("SELECT")
 
 
+def _extract_sql(raw: str) -> str:
+    """Strip markdown code fences Gemini sometimes wraps around SQL."""
+    import re
+    # Match ```sql ... ``` or ``` ... ```
+    match = re.search(r"```(?:sql)?\s*(.*?)\s*```", raw, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return raw.strip()
+
+
 def _build_schema_section(schema: list | None, multi_table: bool = False) -> str:
     """Build schema section from live schema or fall back to hardcoded."""
     if not schema:
@@ -171,9 +181,10 @@ def generate_sql():
         question=question
     )
 
-    # 3. Call Gemini
+    # 3. Call Gemini and clean the response
     try:
-        sql = _call_gemini(prompt)
+        raw = _call_gemini(prompt)
+        sql = _extract_sql(raw)   # strip markdown code fences if present
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
